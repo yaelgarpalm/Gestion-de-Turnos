@@ -3,7 +3,7 @@ import { provideHttpClient } from '@angular/common/http';
 import { Component, OnDestroy, OnInit, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
-import { catchError, interval, of, Subscription, startWith, switchMap } from 'rxjs';
+import { catchError, exhaustMap, interval, of, Subscription, startWith } from 'rxjs';
 
 interface Mesa {
   id: number;
@@ -73,7 +73,8 @@ interface ResultadoTurno {
               </div>
               <h3>Comienza aquí</h3>
               <p>Solicita tu turno y mantente atento a los llamados en pantalla.</p>
-              <button class="primary" (click)="solicitarTurno()" [disabled]="creatingTurn || !connected">
+              <button class="primary" (click)="solicitarTurno()" [disabled]="creatingTurn || !connected" [attr.aria-busy]="creatingTurn">
+                <span class="spinner" *ngIf="creatingTurn" aria-hidden="true"></span>
                 {{ creatingTurn ? 'Generando turno…' : 'Tomar un turno' }}
               </button>
             </div>
@@ -109,7 +110,10 @@ interface ResultadoTurno {
               <h2>Control de atención</h2>
               <p>Gestiona las cuatro mesas y sigue la fila de espera.</p>
             </div>
-            <button class="secondary reset-button" (click)="reiniciar()" [disabled]="!connected">Reiniciar demo</button>
+            <button class="secondary reset-button" (click)="reiniciar()" [disabled]="!connected || resetting || busyMesa !== null" [attr.aria-busy]="resetting">
+              <span class="spinner" *ngIf="resetting" aria-hidden="true"></span>
+              {{ resetting ? 'Reiniciando…' : 'Reiniciar demo' }}
+            </button>
           </div>
 
           <section class="metrics" aria-label="Resumen de atención">
@@ -129,8 +133,14 @@ interface ResultadoTurno {
                   <span>{{ mesa.turno ? 'Turno actual' : 'Sin cliente asignado' }}</span>
                 </div>
                 <div class="actions">
-                  <button class="secondary call-next-button" *ngIf="mesa.estado === 'libre' && (estado?.total_esperando ?? 0) > 0" [disabled]="busyMesa === mesa.id || !connected" (click)="atender(mesa.id)">Llamar siguiente aquí</button>
-                  <button class="danger" *ngIf="mesa.estado === 'ocupada'" [disabled]="busyMesa === mesa.id || !connected" (click)="finalizar(mesa.id)">{{ (estado?.total_esperando ?? 0) > 0 ? 'Finalizar y llamar siguiente' : 'Finalizar atención' }}</button>
+                  <button class="secondary call-next-button" *ngIf="mesa.estado === 'libre' && (estado?.total_esperando ?? 0) > 0" [disabled]="busyMesa !== null || !connected" [attr.aria-busy]="busyMesa === mesa.id" (click)="atender(mesa.id)">
+                    <span class="spinner" *ngIf="busyMesa === mesa.id" aria-hidden="true"></span>
+                    {{ busyMesa === mesa.id ? 'Asignando turno…' : 'Llamar siguiente aquí' }}
+                  </button>
+                  <button class="danger" *ngIf="mesa.estado === 'ocupada'" [disabled]="busyMesa !== null || !connected" [attr.aria-busy]="busyMesa === mesa.id" (click)="finalizar(mesa.id)">
+                    <span class="spinner" *ngIf="busyMesa === mesa.id" aria-hidden="true"></span>
+                    {{ busyMesa === mesa.id ? 'Procesando…' : ((estado?.total_esperando ?? 0) > 0 ? 'Finalizar y llamar siguiente' : 'Finalizar atención') }}
+                  </button>
                 </div>
               </article>
             </div>
@@ -203,6 +213,7 @@ class AppComponent implements OnInit, OnDestroy {
   ultimoTurno: ResultadoTurno | null = null;
   mensaje = '';
   creatingTurn = false;
+  resetting = false;
   connected = false;
   private wasConnected = false;
   private messageTimer: number | undefined;
@@ -216,7 +227,7 @@ class AppComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.sub = interval(1000).pipe(
       startWith(0),
-      switchMap(() => this.http.get<Estado>(`${this.api}/estado/`).pipe(
+      exhaustMap(() => this.http.get<Estado>(`${this.api}/estado/`).pipe(
         catchError(() => {
           this.connected = false;
           this.wasConnected = false;
@@ -246,18 +257,22 @@ class AppComponent implements OnInit, OnDestroy {
     window.clearTimeout(this.messageTimer);
   }
 
-  private showMessage(message: string): void {
+  private showMessage(message: string, persistent = false): void {
     this.mensaje = message;
     window.clearTimeout(this.messageTimer);
-    this.messageTimer = window.setTimeout(() => this.mensaje = '', 3600);
+    this.messageTimer = persistent ? undefined : window.setTimeout(() => this.mensaje = '', 3600);
   }
 
   solicitarTurno(): void {
+    if (this.creatingTurn || !this.connected) return;
     this.creatingTurn = true;
+    this.showMessage('Solicitando tu turno…', true);
     this.http.post<ResultadoTurno>(`${this.api}/turnos/`, {}).subscribe({
       next: result => {
         this.ultimoTurno = result;
-        this.mensaje = '';
+        this.showMessage(result.mesa
+          ? `Turno ${result.turno}: pasa a la Mesa ${result.mesa}.`
+          : `Turno ${result.turno} registrado. Te avisaremos cuando haya una mesa disponible.`);
         this.creatingTurn = false;
       },
       error: err => {
@@ -268,15 +283,21 @@ class AppComponent implements OnInit, OnDestroy {
   }
 
   atender(id: number): void {
+    if (this.busyMesa !== null || !this.connected) return;
     this.busyMesa = id;
-    this.http.post(`${this.api}/mesas/${id}/atender/`, {}).subscribe({
-      next: () => { this.showMessage(`El siguiente turno fue llamado a la Mesa ${id}.`); this.busyMesa = null; },
+    this.showMessage(`Llamando al siguiente turno en la Mesa ${id}…`, true);
+    this.http.post<{ turno: string }>(`${this.api}/mesas/${id}/atender/`, {}).subscribe({
+      next: result => { this.showMessage(`Turno ${result.turno}, favor de pasar a Mesa ${id}.`); this.busyMesa = null; },
       error: err => { this.showMessage(err?.error?.error ?? 'No fue posible asignar el turno.'); this.busyMesa = null; }
     });
   }
 
   finalizar(id: number): void {
+    if (this.busyMesa !== null || !this.connected) return;
     this.busyMesa = id;
+    this.showMessage((this.estado?.total_esperando ?? 0) > 0
+      ? `Finalizando atención y llamando al siguiente turno en Mesa ${id}…`
+      : `Finalizando atención en Mesa ${id}…`, true);
     this.http.post<{ siguiente: string | null }>(`${this.api}/mesas/${id}/finalizar/`, {}).subscribe({
       next: result => {
         this.showMessage(result.siguiente
@@ -289,14 +310,17 @@ class AppComponent implements OnInit, OnDestroy {
   }
 
   reiniciar(): void {
-    if (!confirm('¿Reiniciar todos los turnos?')) return;
+    if (this.resetting || !this.connected || !confirm('¿Reiniciar todos los turnos?')) return;
 
+    this.resetting = true;
+    this.showMessage('Reiniciando la fila…', true);
     this.http.post(`${this.api}/reiniciar/`, {}).subscribe({
       next: () => {
         this.ultimoTurno = null;
         this.showMessage('Sistema reiniciado.');
+        this.resetting = false;
       },
-      error: () => this.showMessage('No fue posible reiniciar.')
+      error: () => { this.showMessage('No fue posible reiniciar.'); this.resetting = false; }
     });
   }
 
