@@ -196,7 +196,9 @@ class AppComponent implements OnInit, OnDestroy {
   private http = inject(HttpClient);
   private sub?: Subscription;
 
-  api = 'http://localhost:8000/api';
+  api = location.hostname === 'localhost' || location.hostname === '127.0.0.1'
+    ? 'http://localhost:8000/api'
+    : 'https://gestion-turnos-api.vercel.app/api';
   estado: Estado | null = null;
   ultimoTurno: ResultadoTurno | null = null;
   mensaje = '';
